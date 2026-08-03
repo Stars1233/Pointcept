@@ -198,7 +198,8 @@ class NuScenesImagePointDataset(DefaultImagePointDataset):
         self.if_img = if_img
         self.ignore_index = ignore_index
         self.learning_map = self.get_learning_map(ignore_index)
-        self.img_ratio = img_num / (6 * sweeps)
+        frame_count = sweeps + 1 if if_sweep else 1
+        self.img_ratio = img_num / (6 * frame_count)
         super().__init__(ignore_index=ignore_index, if_img=if_img, **kwargs)
 
     @staticmethod
@@ -245,6 +246,10 @@ class NuScenesImagePointDataset(DefaultImagePointDataset):
         lidar_colors[mask] = image[v, u, :]
         lidar_uv_coords[mask] = np.stack([u, v], axis=1)  # (M, 2)
         return lidar_colors, lidar_uv_coords, mask
+
+    @staticmethod
+    def transform_normal(normal, transform):
+        return (transform[:3, :3] @ normal.T).T
 
     def get_info_path(self, split):
         assert split in ["train", "val", "test"]
@@ -293,6 +298,7 @@ class NuScenesImagePointDataset(DefaultImagePointDataset):
         points = np.fromfile(str(lidar_path), dtype=np.float32, count=-1).reshape(
             [-1, 5]
         )
+        keyframe_point_count = points.shape[0]
 
         imgs = []
         cam_coords = []
@@ -367,8 +373,7 @@ class NuScenesImagePointDataset(DefaultImagePointDataset):
                     sensor2lidar = np.eye(4)
                     sensor2lidar[:3, :3] = cam_info["sensor2lidar_rotation"]
                     sensor2lidar[:3, 3] = cam_info["sensor2lidar_translation"]
-                    # sensor2lidar = cam_lidar_tm @ sensor2lidar
-                    lidar2sensor = np.linalg.inv(sensor2lidar)
+                    lidar2sensor = np.linalg.inv(sensor2lidar) @ cam_lidar_tm
                     lidar_colors, correspondence_info, _ = (
                         self.project_lidar_to_image_with_color(
                             points,
@@ -393,6 +398,7 @@ class NuScenesImagePointDataset(DefaultImagePointDataset):
                 cam_coord = points[:, :3]
                 cam_center = np.array([0, 0, 0])
                 cam_normal = self.get_normals(cam_center, cam_coord)
+                cam_normal = self.transform_normal(cam_normal, cam_lidar_tm)
                 cam_normals.append(cam_normal)
                 ones = np.ones((points.shape[0], 1))
                 cam_coord_hom = np.concatenate([cam_coord, ones], axis=1)  # (N, 4)
@@ -413,6 +419,7 @@ class NuScenesImagePointDataset(DefaultImagePointDataset):
         coord_homo = np.hstack((coord, np.ones((coord.shape[0], 1))))
         coord_homo = coord_homo @ car_from_ref.T
         coord = coord_homo[:, :3]
+        normal = self.transform_normal(normal, car_from_ref)
 
         img_assets = dict()
         if self.if_img:
@@ -470,7 +477,23 @@ class NuScenesImagePointDataset(DefaultImagePointDataset):
                 np.int64
             )
         else:
-            segment = np.ones((points.shape[0],), dtype=np.int64) * self.ignore_index
+            segment = (
+                np.ones((keyframe_point_count,), dtype=np.int64) * self.ignore_index
+            )
+
+        if segment.shape[0] != keyframe_point_count:
+            raise ValueError(
+                f"nuScenes sample {self.get_data_name(idx)} has "
+                f"{keyframe_point_count} keyframe points but "
+                f"{segment.shape[0]} segment labels."
+            )
+
+        if self.if_sweep:
+            sweep_point_count = coord.shape[0] - keyframe_point_count
+            sweep_segment = np.full(
+                (sweep_point_count,), self.ignore_index, dtype=segment.dtype
+            )
+            segment = np.concatenate((segment, sweep_segment), axis=0)
 
         color = color.astype(np.float32)
         if self.if_sweep:

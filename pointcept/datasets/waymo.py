@@ -14,6 +14,13 @@ from .builder import DATASETS
 from .defaults import DefaultDataset, DefaultImagePointDataset
 
 
+def _append_timing_embedding(strength, timestamp):
+    if strength.ndim == 1:
+        strength = strength.reshape(-1, 1)
+    timing = np.full((strength.shape[0], 1), timestamp, dtype=strength.dtype)
+    return np.hstack((strength, timing))
+
+
 @DATASETS.register_module()
 class WaymoDataset(DefaultDataset):
     def __init__(
@@ -51,19 +58,33 @@ class WaymoDataset(DefaultDataset):
         coord = (pose_align @ coord.T).T[:, :3]
         return coord
 
+    @staticmethod
+    def align_normal(normal, pose, target_pose):
+        pose_align = np.matmul(np.linalg.inv(target_pose), pose)
+        return (pose_align[:3, :3] @ normal.T).T
+
     def get_single_frame(self, idx):
         return super().get_data(idx)
 
     def get_data(self, idx):
         idx = idx % len(self.data_list)
         if self.timestamp == (0,):
-            return self.get_single_frame(idx)
+            data_dict = self.get_single_frame(idx)
+            if self.timing_embedding:
+                data_dict["strength"] = _append_timing_embedding(
+                    data_dict["strength"], 0
+                )
+            return data_dict
 
         sequence_index = self.sequence_index[idx]
         lower, upper = self.sequence_offset[[sequence_index, sequence_index + 1]]
         major_frame = self.get_single_frame(idx)
         name = major_frame.pop("name")
         target_pose = major_frame.pop("pose")
+        if self.timing_embedding:
+            major_frame["strength"] = _append_timing_embedding(
+                major_frame["strength"], 0
+            )
         for key in major_frame.keys():
             major_frame[key] = [major_frame[key]]
 
@@ -77,17 +98,18 @@ class WaymoDataset(DefaultDataset):
             refer_frame["coord"] = self.align_pose(
                 refer_frame["coord"], pose, target_pose
             )
+            if "normal" in refer_frame:
+                refer_frame["normal"] = self.align_normal(
+                    refer_frame["normal"], pose, target_pose
+                )
             if not self.reference_label:
                 refer_frame["segment"] = (
                     np.ones_like(refer_frame["segment"]) * self.ignore_index
                 )
 
             if self.timing_embedding:
-                refer_frame["strength"] = np.hstack(
-                    (
-                        refer_frame["strength"],
-                        np.ones_like(refer_frame["strength"]) * timestamp,
-                    )
+                refer_frame["strength"] = _append_timing_embedding(
+                    refer_frame["strength"], timestamp
                 )
 
             for key in major_frame.keys():
@@ -160,13 +182,22 @@ class WaymoColorNormalDataset(WaymoDataset):
     def get_data(self, idx):
         idx = idx % len(self.data_list)
         if self.timestamp == (0,):
-            return self.get_single_frame(idx)
+            data_dict = self.get_single_frame(idx)
+            if self.timing_embedding:
+                data_dict["strength"] = _append_timing_embedding(
+                    data_dict["strength"], 0
+                )
+            return data_dict
 
         sequence_index = self.sequence_index[idx]
         lower, upper = self.sequence_offset[[sequence_index, sequence_index + 1]]
         major_frame = self.get_single_frame(idx)
         name = major_frame.pop("name")
         target_pose = major_frame.pop("pose")
+        if self.timing_embedding:
+            major_frame["strength"] = _append_timing_embedding(
+                major_frame["strength"], 0
+            )
         for key in major_frame.keys():
             major_frame[key] = [major_frame[key]]
 
@@ -180,22 +211,26 @@ class WaymoColorNormalDataset(WaymoDataset):
             refer_frame["coord"] = self.align_pose(
                 refer_frame["coord"], pose, target_pose
             )
+            if "normal" in refer_frame:
+                refer_frame["normal"] = self.align_normal(
+                    refer_frame["normal"], pose, target_pose
+                )
             if not self.reference_label:
                 refer_frame["segment"] = (
                     np.ones_like(refer_frame["segment"]) * self.ignore_index
                 )
 
             if self.timing_embedding:
-                refer_frame["strength"] = np.hstack(
-                    (
-                        refer_frame["strength"],
-                        np.ones_like(refer_frame["strength"]) * timestamp,
-                    )
+                refer_frame["strength"] = _append_timing_embedding(
+                    refer_frame["strength"], timestamp
                 )
 
             for key in major_frame.keys():
                 major_frame[key].append(refer_frame[key])
         for key in major_frame.keys():
+            if isinstance(major_frame[key][0], str):
+                major_frame[key] = major_frame[key][0]
+                continue
             major_frame[key] = np.concatenate(major_frame[key], axis=0)
         major_frame["name"] = name
         return major_frame
@@ -223,12 +258,13 @@ class WaymoImagePointDataset(DefaultImagePointDataset):
         self.reference_label = reference_label
         self.timing_embedding = timing_embedding
         self.sweeps = sweeps
+        self.data_name = sorted(self.data_name)
         _, self.sequence_offset, self.sequence_index = np.unique(
-            [data.split("_with_camera_labels_")[0] for data in self.data_list.keys()],
+            [data.split("_with_camera_labels_")[0] for data in self.data_name],
             return_index=True,
             return_inverse=True,
         )
-        self.sequence_offset = np.append(self.sequence_offset, len(self.data_list))
+        self.sequence_offset = np.append(self.sequence_offset, len(self.data_name))
 
     @staticmethod
     def align_pose(coord, pose, target_pose):
@@ -237,6 +273,11 @@ class WaymoImagePointDataset(DefaultImagePointDataset):
         coord = (pose_align @ coord.T).T[:, :3]
         return coord
 
+    @staticmethod
+    def align_normal(normal, pose, target_pose):
+        pose_align = np.matmul(np.linalg.inv(target_pose), pose)
+        return (pose_align[:3, :3] @ normal.T).T
+
     def get_single_frame(self, idx):
         return super().get_data(idx)
 
@@ -244,23 +285,27 @@ class WaymoImagePointDataset(DefaultImagePointDataset):
         idx = idx % len(self.data_list)
         if self.timestamp == (0,):
             data_dict = self.get_single_frame(idx)
+            if self.timing_embedding:
+                data_dict["strength"] = _append_timing_embedding(
+                    data_dict["strength"], 0
+                )
             return data_dict
 
         sequence_index = self.sequence_index[idx]
         lower, upper = self.sequence_offset[[sequence_index, sequence_index + 1]]
-        self.timestamp = [0] + [
+        valid_timestamps = [0] + [
             timestamp
             for timestamp in self.timestamp[1:]
-            if timestamp + idx >= lower and upper > timestamp + idx
+            if lower <= timestamp + idx < upper
         ]
-        for timestamp in self.timestamp[1:]:
-            refer_idx = timestamp + idx
-            if refer_idx < lower or upper <= refer_idx:
-                continue
-        imgs_idx = random.sample(self.timestamp, 1)[0]
+        imgs_idx = random.sample(valid_timestamps, 1)[0]
         major_frame = self.get_single_frame(idx)
         name = major_frame.pop("name")
         target_pose = major_frame.pop("pose")
+        if self.timing_embedding:
+            major_frame["strength"] = _append_timing_embedding(
+                major_frame["strength"], 0
+            )
         if not self.if_img:
             pass
         elif imgs_idx == 0:
@@ -275,27 +320,26 @@ class WaymoImagePointDataset(DefaultImagePointDataset):
             if key in self.PC_VALID_ASSETS:
                 major_frame[key] = [major_frame[key]]
 
-        for timestamp in self.timestamp[1:]:
+        for timestamp in valid_timestamps[1:]:
             refer_idx = timestamp + idx
-            if refer_idx < lower or upper <= refer_idx:
-                continue
             refer_frame = self.get_single_frame(refer_idx)
             refer_frame.pop("name")
             pose = refer_frame.pop("pose")
             refer_frame["coord"] = self.align_pose(
                 refer_frame["coord"], pose, target_pose
             )
+            if "normal" in refer_frame:
+                refer_frame["normal"] = self.align_normal(
+                    refer_frame["normal"], pose, target_pose
+                )
             if not self.reference_label:
                 refer_frame["segment"] = (
                     np.ones_like(refer_frame["segment"]) * self.ignore_index
                 )
 
             if self.timing_embedding:
-                refer_frame["strength"] = np.hstack(
-                    (
-                        refer_frame["strength"],
-                        np.ones_like(refer_frame["strength"]) * timestamp,
-                    )
+                refer_frame["strength"] = _append_timing_embedding(
+                    refer_frame["strength"], timestamp
                 )
 
             for key in major_frame.keys():

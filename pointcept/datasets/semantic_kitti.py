@@ -281,13 +281,14 @@ class SemanticKITTIImagePointDataset(DefaultImagePointDataset):
     @staticmethod
     def align_pose(coord, pose, target_pose):
         coord = np.hstack((coord, np.ones_like(coord[:, :1])))
-        try:
-            pose_align = np.matmul(np.linalg.inv(target_pose), pose)
-        except:
-            print(target_pose)
-            exit()
+        pose_align = np.matmul(np.linalg.inv(target_pose), pose)
         coord = (pose_align @ coord.T).T[:, :3]
         return coord
+
+    @staticmethod
+    def align_normal(normal, pose, target_pose):
+        pose_align = np.matmul(np.linalg.inv(target_pose), pose)
+        return (pose_align[:3, :3] @ normal.T).T
 
     @staticmethod
     def get_pose(poses_file_path, frame_index, Tr):
@@ -468,7 +469,12 @@ class SemanticKITTIImagePointDataset(DefaultImagePointDataset):
         sequence_index = self.sequence_index[idx]
         lower, upper = self.sequence_offset[[sequence_index, sequence_index + 1]]
         assert lower <= idx and idx < upper
-        imgs_idx = random.sample(self.timestamp, 1)[0]
+        valid_timestamps = [0] + [
+            timestamp
+            for timestamp in self.timestamp[1:]
+            if lower <= timestamp + idx < upper
+        ]
+        imgs_idx = random.sample(valid_timestamps, 1)[0]
         major_frame = self.get_single_frame(idx)
         poses_file_path = os.path.dirname(os.path.dirname(self.data_list[idx]))
         poses_file_path = os.path.join(poses_file_path, "poses.txt")
@@ -486,16 +492,17 @@ class SemanticKITTIImagePointDataset(DefaultImagePointDataset):
             if key in self.PC_VALID_ASSETS:
                 major_frame[key] = [major_frame[key]]
 
-        for timestamp in self.timestamp[1:]:
+        for timestamp in valid_timestamps[1:]:
             refer_idx = timestamp + idx
-            if refer_idx < lower or upper <= refer_idx:
-                continue
             refer_frame = self.get_single_frame(refer_idx)
             refer_frame.pop("name")
             Tr = refer_frame.pop("Tr")
             pose = self.get_pose(poses_file_path, idx - lower + timestamp, Tr)
             refer_frame["coord"] = self.align_pose(
                 refer_frame["coord"], pose, target_pose
+            )
+            refer_frame["normal"] = self.align_normal(
+                refer_frame["normal"], pose, target_pose
             )
             for key in major_frame.keys():
                 if key in self.PC_VALID_ASSETS:
